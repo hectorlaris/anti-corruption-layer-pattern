@@ -1,5 +1,6 @@
 {
-    "APIGatewayURL": {
-        "Dev": "https://gkpfu3uloh.execute-api.us-east-1.amazonaws.com/dev"
-    }
+  "APIGatewayURL": {
+    "Dev": "https://0g1j5ldvre.execute-api.us-east-1.amazonaws.com/prod/",
+    "Prod": "https://0g1j5ldvre.execute-api.us-east-1.amazonaws.com/prod/"
+  }
 }

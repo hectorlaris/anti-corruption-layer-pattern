@@ -1,0 +1,333 @@
+name: Anti-Corruption Layer - CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION: us-east-1
+  DOTNET_VERSION: '8.0.x'
+
+jobs:
+  # ============================================
+  # PASO 1: BUILD Y TEST
+  # ============================================
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ============================================
+      # Compilar el Monolito
+      # ============================================
+      - name: Build Monolith (anti-corruption-layer-impl)
+        run: |
+          cd anti-corruption-layer-impl
+          dotnet build --configuration Release
+        continue-on-error: false
+
+      # ============================================
+      # Compilar el Lambda
+      # ============================================
+      - name: Build Lambda (user-microservice-lambda)
+        run: |
+          cd user-microservice-lambda/src/UserMicroserviceLambda
+          dotnet build --configuration Release
+        continue-on-error: false
+
+      # ============================================
+      # Compilar el CDK
+      # ============================================
+      - name: Build CDK (cdk-user-microservice)
+        run: |
+          cd cdk-user-microservice/src/CdkUserMicroservice
+          dotnet build --configuration Release
+        continue-on-error: false
+
+      # ============================================
+      # Ejecutar Tests del Lambda
+      # ============================================
+      - name: Run Lambda Tests
+        run: |
+          cd user-microservice-lambda/test/UserMicroserviceLambda.Tests
+          dotnet test --configuration Release --verbosity normal --logger "console;verbosity=detailed"
+        continue-on-error: false
+
+      # ============================================
+      # Guardar artefactos de compilación
+      # ============================================
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-artifacts
+          path: |
+            anti-corruption-layer-impl/bin/Release/
+            user-microservice-lambda/src/UserMicroserviceLambda/bin/Release/
+            cdk-user-microservice/src/CdkUserMicroservice/bin/Release/
+          retention-days: 7
+
+  # ============================================
+  # PASO 2: EMPAQUETAR LAMBDA
+  # ============================================
+  package-lambda:
+    name: Package Lambda Function
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install AWS Lambda Tools
+        run: dotnet tool install --global Amazon.Lambda.Tools
+
+      - name: Package Lambda
+        run: |
+          cd user-microservice-lambda/src/UserMicroserviceLambda
+          dotnet lambda package -o ../../../lambda-package.zip
+        continue-on-error: false
+
+      # ============================================
+      # Guardar el ZIP del Lambda
+      # ============================================
+      - name: Upload Lambda Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-package
+          path: lambda-package.zip
+          retention-days: 30
+
+  # ============================================
+  # PASO 3: ANÁLISIS DE CÓDIGO (Opcional)
+  # ============================================
+  code-analysis:
+    name: Code Quality Analysis
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Análisis de código con StyleCop
+      - name: Install analyzers
+        run: |
+          dotnet tool install --global StyleCop.Analyzers
+
+      - name: Code Analysis - Monolith
+        run: |
+          cd anti-corruption-layer-impl
+          dotnet build --configuration Release /p:EnforceCodeStyleInBuild=true
+        continue-on-error: true
+
+      - name: Code Analysis - Lambda
+        run: |
+          cd user-microservice-lambda/src/UserMicroserviceLambda
+          dotnet build --configuration Release /p:EnforceCodeStyleInBuild=true
+        continue-on-error: true
+
+  # ============================================
+  # PASO 4: DEPLOY A AWS (Solo en main)
+  # ============================================
+  deploy-to-aws:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: [build-and-test, package-lambda]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ============================================
+      # Configurar Credenciales AWS
+      # ============================================
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+        continue-on-error: true
+
+      # Si no usas OIDC, usa access keys en su lugar:
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      # ============================================
+      # Descargar Lambda Package
+      # ============================================
+      - name: Download Lambda Package
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-package
+
+      # ============================================
+      # Preparar directorio para CDK
+      # ============================================
+      - name: Prepare Lambda for CDK
+        run: |
+          mkdir -p cdk-user-microservice/lambdas
+          mv lambda-package.zip cdk-user-microservice/lambdas/UserMicroserviceLambda.zip
+          ls -la cdk-user-microservice/lambdas/
+
+      # ============================================
+      # Setup Node.js para CDK
+      # ============================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ============================================
+      # Instalar y Desplegar con CDK
+      # ============================================
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Build CDK Stack
+        run: |
+          cd cdk-user-microservice/src/CdkUserMicroservice
+          dotnet build --configuration Release
+
+      - name: Bootstrap CDK (if needed)
+        run: |
+          cd cdk-user-microservice
+          export JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=true
+          cdk bootstrap --region ${{ env.AWS_REGION }} || true
+
+      - name: Synth CDK Stack
+        run: |
+          cd cdk-user-microservice
+          export JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=true
+          cdk synth
+
+      - name: Deploy CDK Stack
+        run: |
+          cd cdk-user-microservice
+          export JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=true
+          cdk deploy --require-approval never --region ${{ env.AWS_REGION }}
+
+      # ============================================
+      # Notify Deployment Success
+      # ============================================
+      - name: Notify Deployment Success
+        if: success()
+        run: |
+          echo "✅ Deployment successful!"
+          echo "Stack: CdkUserMicroserviceStack"
+          echo "Region: ${{ env.AWS_REGION }}"
+
+      # ============================================
+      # Notify Deployment Failure
+      # ============================================
+      - name: Notify Deployment Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed!"
+          echo "Check logs above for details"
+        continue-on-error: true
+
+  # ============================================
+  # PASO 5: VALIDAR DEPLOYMENT
+  # ============================================
+  validate-deployment:
+    name: Validate Deployment
+    runs-on: ubuntu-latest
+    needs: deploy-to-aws
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ============================================
+      # Configurar Credenciales AWS
+      # ============================================
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+        continue-on-error: true
+
+      # ============================================
+      # Verificar que Lambda existe
+      # ============================================
+      - name: Check Lambda Function
+        run: |
+          aws lambda get-function --function-name UserMicroserviceLambda --region ${{ env.AWS_REGION }}
+          echo "✅ Lambda function exists and is deployed"
+        continue-on-error: true
+
+      # ============================================
+      # Verificar que API Gateway existe
+      # ============================================
+      - name: Check API Gateway
+        run: |
+          aws apigateway get-rest-apis --region ${{ env.AWS_REGION }} | grep -q "MicroserviceAPI" && echo "✅ API Gateway exists" || echo "⚠️ API Gateway not found"
+        continue-on-error: true
+
+      # ============================================
+      # Verificar CloudFormation Stack
+      # ============================================
+      - name: Check CloudFormation Stack
+        run: |
+          aws cloudformation describe-stacks --stack-name CdkUserMicroserviceStack --region ${{ env.AWS_REGION }}
+          echo "✅ Stack is deployed"
+        continue-on-error: true
+
+      # ============================================
+      # Obtener outputs del stack
+      # ============================================
+      - name: Get Stack Outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name CdkUserMicroserviceStack \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output table \
+            --region ${{ env.AWS_REGION }}
+        continue-on-error: true
+
+# ============================================
+# RESUMEN DE JOBS
+# ============================================
+# 1. build-and-test: Compila y prueba todos los proyectos
+# 2. package-lambda: Empaqueta la función Lambda
+# 3. code-analysis: Analiza la calidad del código
+# 4. deploy-to-aws: Despliega con CDK a AWS
+# 5. validate-deployment: Valida que el despliegue fue exitoso

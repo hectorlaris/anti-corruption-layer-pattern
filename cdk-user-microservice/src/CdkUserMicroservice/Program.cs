@@ -10,33 +10,49 @@ namespace CdkUserMicroservice
         public static void Main(string[] args)
         {
             var app = new App();
+
+            // Get AWS Account ID from environment or CLI
+            string? accountId = System.Environment.GetEnvironmentVariable("CDK_DEFAULT_ACCOUNT");
+            string? region = System.Environment.GetEnvironmentVariable("CDK_DEFAULT_REGION");
+
+            // If environment variables are not set, try to get from AWS CLI
+            if (string.IsNullOrEmpty(accountId) || string.IsNullOrEmpty(region))
+            {
+                try
+                {
+                    var processInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "aws",
+                        Arguments = "sts get-caller-identity --query Account --output text",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    };
+
+                    using (var process = System.Diagnostics.Process.Start(processInfo))
+                    {
+                        if (process != null)
+                        {
+                            accountId = process.StandardOutput.ReadToEnd().Trim();
+                            region = "us-east-1";
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error getting AWS account: {ex.Message}");
+                    Console.Error.WriteLine("Please set CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION environment variables");
+                    throw;
+                }
+            }
+
             new CdkUserMicroserviceStack(app, "CdkUserMicroserviceStack", new StackProps
             {
-                // If you don't specify 'env', this stack will be environment-agnostic.
-                // Account/Region-dependent features and context lookups will not work,
-                // but a single synthesized template can be deployed anywhere.
-
-                // Uncomment the next block to specialize this stack for the AWS Account
-                // and Region that are implied by the current CLI configuration.
-                /*
                 Env = new Amazon.CDK.Environment
                 {
-                    Account = System.Environment.GetEnvironmentVariable("CDK_DEFAULT_ACCOUNT"),
-                    Region = System.Environment.GetEnvironmentVariable("CDK_DEFAULT_REGION"),
+                    Account = accountId,
+                    Region = region,
                 }
-                */
-
-                // Uncomment the next block if you know exactly what Account and Region you
-                // want to deploy the stack to.
-                /*
-                Env = new Amazon.CDK.Environment
-                {
-                    Account = "123456789012",
-                    Region = "us-east-1",
-                }
-                */
-
-                // For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html
             });
             app.Synth();
         }
